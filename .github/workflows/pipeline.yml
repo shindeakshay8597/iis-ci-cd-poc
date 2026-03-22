@@ -1,9 +1,6 @@
-name: IIS CI-CD POC
+name: CI-CD Pipeline
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       environment:
@@ -15,10 +12,21 @@ on:
           - uat
           - prod
 
+      action:
+        description: "Action type"
+        required: true
+        type: choice
+        options:
+          - deploy
+          - rollback
+
 jobs:
 
   build:
+    if: github.event.inputs.action == 'deploy'
     runs-on: ubuntu-latest
+    outputs:
+      artifact-name: app-build
 
     steps:
       - uses: actions/checkout@v3
@@ -27,48 +35,103 @@ jobs:
         run: dotnet publish -c Release -o ./publish
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4   
         with:
           name: app-build
           path: ./publish
 
-  deploy-dev:
+  deploy:
     needs: build
-    if: github.event_name == 'push'
-    runs-on: [self-hosted, dev-runner]
-    environment: dev
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: app-build
-          path: ./publish
-
-      - name: Deploy Dev
-        run: |
-          Copy-Item "./publish/*" "C:\sites\DevSite" -Recurse -Force
-
-  deploy-manual:
-    needs: build
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event.inputs.action == 'deploy'
     runs-on: self-hosted
+
     environment: ${{ github.event.inputs.environment }}
 
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Set Server Path
+        shell: powershell
+        run: |
+          if ("${{ github.event.inputs.environment }}" -eq "dev") {
+            echo "SITE_PATH=C:\inetpub\wwwroot\DevSite" >> $env:GITHUB_ENV
+          }
+          elseif ("${{ github.event.inputs.environment }}" -eq "uat") {
+            echo "SITE_PATH=C:\inetpub\wwwroot\UATSite" >> $env:GITHUB_ENV
+          }
+          else {
+            echo "SITE_PATH=C:\inetpub\wwwroot\ProdSite" >> $env:GITHUB_ENV
+          }
+
+      - name: Download Artifact
+        uses: actions/download-artifact@v4   
         with:
           name: app-build
           path: ./publish
 
-      - name: Set Path
+      - name: Deploy (Zero Downtime)
+        shell: powershell
         run: |
-          if ("${{ github.event.inputs.environment }}" -eq "uat") {
-            echo "SITE_PATH=C:\sites\UATSite" >> $env:GITHUB_ENV
-          }
-          else {
-            echo "SITE_PATH=C:\sites\ProdSite" >> $env:GITHUB_ENV
+          $sitePath = "$env:SITE_PATH"
+          $envName = "${{ github.event.inputs.environment }}"
+          $backupRoot = "C:\backup"
+
+          $timestamp = Get-Date -Format yyyyMMddHHmmss
+          $backupPath = "$backupRoot\$envName-$timestamp"
+
+          New-Item -ItemType Directory -Path $backupPath -Force
+
+          if (Test-Path "$sitePath\*") {
+              Copy-Item "$sitePath\*" $backupPath -Recurse -Force
           }
 
-      - name: Deploy
+          New-Item "$sitePath\app_offline.htm" -ItemType File -Force
+          Start-Sleep -Seconds 5
+
+          Remove-Item "$sitePath\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item "./publish/*" $sitePath -Recurse -Force
+
+          Remove-Item "$sitePath\app_offline.htm" -ErrorAction SilentlyContinue
+
+  rollback:
+    if: github.event.inputs.action == 'rollback'
+    runs-on: self-hosted
+
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Set Server Path
+        shell: powershell
         run: |
-          Copy-Item "./publish/*" "$env:SITE_PATH" -Recurse -Force
+          if ("${{ github.event.inputs.environment }}" -eq "dev") {
+            echo "SITE_PATH=C:\inetpub\wwwroot\DevSite" >> $env:GITHUB_ENV
+          }
+          elseif ("${{ github.event.inputs.environment }}" -eq "uat") {
+            echo "SITE_PATH=C:\inetpub\wwwroot\UATSite" >> $env:GITHUB_ENV
+          }
+          else {
+            echo "SITE_PATH=C:\inetpub\wwwroot\ProdSite" >> $env:GITHUB_ENV
+          }
+
+      - name: Rollback (Restore Latest Backup)
+        shell: powershell
+        run: |
+          $sitePath = "$env:SITE_PATH"
+          $envName = "${{ github.event.inputs.environment }}"
+          $backupRoot = "C:\backup"
+
+          $latestBackup = Get-ChildItem $backupRoot |
+            Where-Object { $_.Name -like "$envName*" } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $latestBackup) {
+              Write-Error "No backup found for $envName"
+              exit 1
+          }
+
+          New-Item "$sitePath\app_offline.htm" -ItemType File -Force
+          Start-Sleep -Seconds 5
+
+          Remove-Item "$sitePath\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item "$($latestBackup.FullName)\*" $sitePath -Recurse -Force
+
+          Remove-Item "$sitePath\app_offline.htm" -ErrorAction SilentlyContinue
