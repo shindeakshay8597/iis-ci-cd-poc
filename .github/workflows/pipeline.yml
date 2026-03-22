@@ -35,7 +35,7 @@ jobs:
         run: dotnet publish -c Release -o ./publish
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4   
+        uses: actions/upload-artifact@v4
         with:
           name: app-build
           path: ./publish
@@ -53,43 +53,51 @@ jobs:
         run: |
           if ("${{ github.event.inputs.environment }}" -eq "dev") {
             echo "SITE_PATH=C:\inetpub\wwwroot\DevSite" >> $env:GITHUB_ENV
+            echo "APP_POOL=DevSite" >> $env:GITHUB_ENV
           }
           elseif ("${{ github.event.inputs.environment }}" -eq "uat") {
             echo "SITE_PATH=C:\inetpub\wwwroot\UATSite" >> $env:GITHUB_ENV
+            echo "APP_POOL=UATSite" >> $env:GITHUB_ENV
           }
           else {
             echo "SITE_PATH=C:\inetpub\wwwroot\ProdSite" >> $env:GITHUB_ENV
+            echo "APP_POOL=ProdSite" >> $env:GITHUB_ENV
           }
 
       - name: Download Artifact
-        uses: actions/download-artifact@v4   
+        uses: actions/download-artifact@v4
         with:
           name: app-build
           path: ./publish
 
-      - name: Deploy (Zero Downtime)
+      - name: Backup and Deploy (App Pool Restart)
         shell: powershell
         run: |
+          Import-Module WebAdministration
+
           $sitePath = "$env:SITE_PATH"
+          $appPool = "$env:APP_POOL"
           $envName = "${{ github.event.inputs.environment }}"
           $backupRoot = "C:\backup"
 
           $timestamp = Get-Date -Format yyyyMMddHHmmss
           $backupPath = "$backupRoot\$envName-$timestamp"
 
+          # Backup
           New-Item -ItemType Directory -Path $backupPath -Force
-
           if (Test-Path "$sitePath\*") {
               Copy-Item "$sitePath\*" $backupPath -Recurse -Force
           }
 
-          New-Item "$sitePath\app_offline.htm" -ItemType File -Force
-          Start-Sleep -Seconds 5
+          # Stop App Pool
+          Stop-WebAppPool -Name $appPool
 
+          # Deploy
           Remove-Item "$sitePath\*" -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item "./publish/*" $sitePath -Recurse -Force
 
-          Remove-Item "$sitePath\app_offline.htm" -ErrorAction SilentlyContinue
+          # Start App Pool
+          Start-WebAppPool -Name $appPool
 
   rollback:
     if: github.event.inputs.action == 'rollback'
@@ -103,18 +111,24 @@ jobs:
         run: |
           if ("${{ github.event.inputs.environment }}" -eq "dev") {
             echo "SITE_PATH=C:\inetpub\wwwroot\DevSite" >> $env:GITHUB_ENV
+            echo "APP_POOL=DevSite" >> $env:GITHUB_ENV
           }
           elseif ("${{ github.event.inputs.environment }}" -eq "uat") {
             echo "SITE_PATH=C:\inetpub\wwwroot\UATSite" >> $env:GITHUB_ENV
+            echo "APP_POOL=UATSite" >> $env:GITHUB_ENV
           }
           else {
             echo "SITE_PATH=C:\inetpub\wwwroot\ProdSite" >> $env:GITHUB_ENV
+            echo "APP_POOL=ProdSite" >> $env:GITHUB_ENV
           }
 
       - name: Rollback (Restore Latest Backup)
         shell: powershell
         run: |
+          Import-Module WebAdministration
+
           $sitePath = "$env:SITE_PATH"
+          $appPool = "$env:APP_POOL"
           $envName = "${{ github.event.inputs.environment }}"
           $backupRoot = "C:\backup"
 
@@ -128,10 +142,12 @@ jobs:
               exit 1
           }
 
-          New-Item "$sitePath\app_offline.htm" -ItemType File -Force
-          Start-Sleep -Seconds 5
+          # Stop App Pool
+          Stop-WebAppPool -Name $appPool
 
+          # Restore
           Remove-Item "$sitePath\*" -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item "$($latestBackup.FullName)\*" $sitePath -Recurse -Force
 
-          Remove-Item "$sitePath\app_offline.htm" -ErrorAction SilentlyContinue
+          # Start App Pool
+          Start-WebAppPool -Name $appPool
