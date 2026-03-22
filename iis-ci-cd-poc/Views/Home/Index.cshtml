@@ -1,0 +1,8 @@
+﻿@{
+    ViewData["Title"] = "Home Page";
+}
+
+<h1> IIS CI/CD POC</h1>
+<p>Environment: @Environment.GetEnvironmentVariable("APP_ENV")</p>
+<p>Deployed at: @DateTime.Now</p>
+<p>Version: @Environment.GetEnvironmentVariable("APP_VERSION")</p>

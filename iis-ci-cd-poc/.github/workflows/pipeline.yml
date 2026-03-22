@@ -1,0 +1,74 @@
+name: IIS CI-CD POC
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Select environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build
+        run: dotnet publish -c Release -o ./publish
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-build
+          path: ./publish
+
+  deploy-dev:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, dev-runner]
+    environment: dev
+
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: app-build
+          path: ./publish
+
+      - name: Deploy Dev
+        run: |
+          Copy-Item "./publish/*" "C:\sites\DevSite" -Recurse -Force
+
+  deploy-manual:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: app-build
+          path: ./publish
+
+      - name: Set Path
+        run: |
+          if ("${{ github.event.inputs.environment }}" -eq "uat") {
+            echo "SITE_PATH=C:\sites\UATSite" >> $env:GITHUB_ENV
+          }
+          else {
+            echo "SITE_PATH=C:\sites\ProdSite" >> $env:GITHUB_ENV
+          }
+
+      - name: Deploy
+        run: |
+          Copy-Item "./publish/*" "$env:SITE_PATH" -Recurse -Force
